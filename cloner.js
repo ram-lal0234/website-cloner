@@ -962,6 +962,18 @@ async function startServer(outputDir, port = 3000) {
   return server;
 }
 
+async function serveFolder(folder, port = 3000) {
+  const app = express();
+
+  // serve static files
+  app.use(express.static(folder));
+
+  app.listen(port, () => {
+    console.log(`🚀 Serving "${folder}" at http://localhost:${port}`);
+    console.log("Press CTRL+C to stop the server");
+  });
+}
+
 // CLI entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
@@ -972,8 +984,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const port = parseInt(args[2]) || 3000;
 
     console.log(`🚀 Starting local server for: ${outputDir}`);
-    startServer(outputDir, port);
-    return;
+    await serveFolder(outputDir, port);
+    process.exit(0);
   }
 
   if (!args[0]) {
