@@ -10,14 +10,12 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "clone:piyush": "babel-node cloner.js https://piyushgarg.dev piyush-site --max-pages=20",
-    "clone:google": "babel-node cloner.js https://google.com google-site --max-pages=5",
-    "clone:hitesh": "babel-node cloner.js https://hitesh.ai hitesh-site --max-pages=15",
-    "clone:vscode": "babel-node cloner.js https://code.visualstudio.com vscode-site --max-pages=10",
-    "serve:piyush": "babel-node cloner.js --serve piyush-site 3000",
-    "serve:google": "babel-node cloner.js --serve google-site 3001",
-    "serve:hitesh": "babel-node cloner.js --serve hitesh-site 3002",
-    "serve:vscode": "babel-node cloner.js --serve vscode-site 3003",
+    "clone:piyush": "babel-node cloner.js https://piyushgarg.dev clones/piyush --max-pages=20",
+    "clone:hitesh": "babel-node cloner.js https://hitesh.ai  clones/hitesh --max-pages=15",
+    "clone:vscode": "babel-node cloner.js https://code.visualstudio.com clones/vscode --max-pages=10",
+    "serve:piyush": "babel-node cloner.js --serve clones/piyush 3000",
+    "serve:hitesh": "babel-node cloner.js --serve clones/hitesh 3002",
+    "serve:vscode": "babel-node cloner.js --serve clones/vscode 3003",
     "clone-and-serve": "npm run clone:piyush && npm run serve:piyush",
     "help": "babel-node cloner.js",
     "start": "babel-node cloner.js"
@@ -57,8 +55,7 @@
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
     "p-limit": "^7.0.0",
-    "puppeteer": "^24.16.2",
-    "react": "^19.1.1"
+    "puppeteer": "^24.16.2"
   },
   "devDependencies": {
     "@babel/core": "^7.28.3",

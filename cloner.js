@@ -90,10 +90,10 @@ async function cloneWebsite(url, options = {}) {
     }
 
     // Generate improved service worker for SPA routing
-    await generateServiceWorker(outputDir, baseUrl);
+    // await generateServiceWorker(outputDir, baseUrl);
 
     // Create fallback routing file
-    await createRoutingFallback(outputDir);
+    // await createRoutingFallback(outputDir);
 
     // Mark as complete
     if (ui && ui.markComplete) {
