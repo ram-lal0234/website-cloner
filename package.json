@@ -1,0 +1,19 @@
+{
+  "name": "website-cloner",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.11.0",
+    "cheerio": "^1.1.0",
+    "p-limit": "^7.0.0",
+    "puppeteer": "^24.16.2"
+  }
+}
