@@ -11,6 +11,7 @@ import * as cheerio from "cheerio";
 import pLimit from "p-limit";
 import express from "express";
 import { createServer } from "http";
+import { uiManager, startCloningUI, startServerUI, showHelpUI } from "./src/ui/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,7 +32,7 @@ const axiosInstance = axios.create({
   },
 });
 
-// Main clone function
+// Main clone function with UI integration
 async function cloneWebsite(url, options = {}) {
   const {
     outputDir = "cloned-site",
@@ -42,9 +43,17 @@ async function cloneWebsite(url, options = {}) {
     usePuppeteer = false,
   } = options;
 
-  console.log(`🚀 Starting to clone: ${url}`);
+  let ui = null;
 
   try {
+    // Start the beautiful UI
+    ui = await startCloningUI(url, {
+      outputDir,
+      maxPages,
+      concurrency,
+      usePuppeteer
+    });
+
     const baseUrl = new URL(url);
     baseOriginUrl = baseUrl.origin;
     await ensureDir(outputDir);
@@ -55,17 +64,29 @@ async function cloneWebsite(url, options = {}) {
     // Add starting URL to queue
     pageQueue.push(url);
 
+    // Update initial progress
+    if (ui && ui.updateProgress) {
+      ui.updateProgress({ total: 1 }, { total: 0 });
+    }
+
     // Process pages
     while (pageQueue.length > 0 && visitedPages < maxPages) {
       const currentUrl = pageQueue.shift();
       if (!currentUrl || processedUrls.has(currentUrl)) continue;
 
-      await processPage(currentUrl, baseUrl, outputDir, limit, usePuppeteer);
+      if (ui && ui.logProcessing) {
+        ui.logProcessing(currentUrl);
+      }
+      await processPage(currentUrl, baseUrl, outputDir, limit, usePuppeteer, ui);
       visitedPages++;
 
-      console.log(
-        `📊 Processed: ${visitedPages} pages, ${downloadedAssets.size} assets`
-      );
+      // Update progress in UI
+      if (ui && ui.updateProgress) {
+        ui.updateProgress(
+          { current: visitedPages, total: Math.min(pageQueue.length + visitedPages, maxPages) },
+          { current: downloadedAssets.size, total: downloadedAssets.size }
+        );
+      }
     }
 
     // Generate improved service worker for SPA routing
@@ -74,24 +95,28 @@ async function cloneWebsite(url, options = {}) {
     // Create fallback routing file
     await createRoutingFallback(outputDir);
 
-    console.log(`✅ Website cloned successfully to: ${outputDir}`);
-    console.log(
-      `📁 Total: ${visitedPages} pages, ${downloadedAssets.size} assets`
-    );
-    console.log(
-      `🌐 Run 'node cloner.js --serve ${outputDir}' to start local server`
-    );
+    // Mark as complete
+    if (ui && ui.markComplete) {
+      ui.markComplete();
+    }
+
+    // Keep UI running for a moment to show completion
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
   } catch (error) {
-    console.error("❌ Error cloning website:", error.message);
+    if (ui && ui.logError) {
+      ui.logError(error.message, url);
+    } else {
+      console.error("❌ Error cloning website:", error.message);
+    }
+    throw error;
   }
 }
 
-// Process individual page
-async function processPage(url, baseUrl, outputDir, limit, usePuppeteer) {
+// Process individual page with UI integration
+async function processPage(url, baseUrl, outputDir, limit, usePuppeteer, ui) {
   if (processedUrls.has(url)) return;
   processedUrls.add(url);
-
-  console.log(`📄 Processing: ${url}`);
 
   try {
     let html;
@@ -112,7 +137,7 @@ async function processPage(url, baseUrl, outputDir, limit, usePuppeteer) {
     const assetUrls = extractAssetUrls($, url, baseUrl);
     await Promise.all(
       assetUrls.map((assetUrl) =>
-        limit(() => downloadAsset(assetUrl, outputDir, baseUrl))
+        limit(() => downloadAsset(assetUrl, outputDir, baseUrl, ui))
       )
     );
 
@@ -132,8 +157,24 @@ async function processPage(url, baseUrl, outputDir, limit, usePuppeteer) {
     const outputPath = path.join(outputDir, localPath);
     await ensureDir(path.dirname(outputPath));
     await fs.writeFile(outputPath, $.html(), "utf-8");
+    
+    // For SPA support, also create a direct route file if this is a sub-page
+    const urlObj = new URL(url);
+    if (urlObj.pathname !== '/' && !urlObj.pathname.endsWith('.html')) {
+      const routePath = path.join(outputDir, urlObj.pathname + '.html');
+      await ensureDir(path.dirname(routePath));
+      await fs.writeFile(routePath, $.html(), "utf-8");
+    }
+
+    if (ui && ui.logSuccess) {
+      ui.logSuccess(url);
+    }
   } catch (error) {
-    console.error(`❌ Failed to process ${url}:`, error.message);
+    if (ui && ui.logError) {
+      ui.logError(error.message, url);
+    } else {
+      console.error(`❌ Failed to process ${url}:`, error.message);
+    }
   }
 }
 
@@ -175,7 +216,7 @@ async function getHtmlWithPuppeteer(url) {
   }
 }
 
-// Extract asset URLs from HTML
+// Extract asset URLs from HTML with enhanced detection
 function extractAssetUrls($, pageUrl, baseUrl) {
   const urls = new Set();
 
@@ -185,9 +226,9 @@ function extractAssetUrls($, pageUrl, baseUrl) {
     if (href) urls.add(resolveUrl(href, pageUrl));
   });
 
-  // JavaScript files
-  $("script[src]").each((_, el) => {
-    const src = $(el).attr("src");
+  // JavaScript files (including module preloads)
+  $("script[src], link[rel='preload'][as='script'], link[rel='modulepreload']").each((_, el) => {
+    const src = $(el).attr("src") || $(el).attr("href");
     if (src && !src.startsWith("data:")) urls.add(resolveUrl(src, pageUrl));
   });
 
@@ -226,13 +267,71 @@ function extractAssetUrls($, pageUrl, baseUrl) {
     }
   });
 
+  // Extract dynamic imports and chunks from inline scripts
+  $("script:not([src])").each((_, el) => {
+    const scriptContent = $(el).html() || "";
+    
+    // Next.js specific patterns
+    const nextChunkPatterns = [
+      /_next\/static\/chunks\/[^'"]+/g,
+      /_next\/static\/[^'"]+/g,
+      /\/_next\/[^'"]+\.js/g,
+      /static\/chunks\/[^'"]+/g,
+      /static\/[^'"]+\.js/g
+    ];
+
+    // General dynamic import patterns
+    const dynamicPatterns = [
+      /import\(['"]([^'"]+)['"]\)/g,
+      /chunks\/[^'"]+\.js/g,
+      /['"]([^'"]*\.js)['"]/g
+    ];
+
+    [...nextChunkPatterns, ...dynamicPatterns].forEach(pattern => {
+      let match;
+      while ((match = pattern.exec(scriptContent)) !== null) {
+        const url = match[1] || match[0];
+        if (url && !url.startsWith('data:') && !url.startsWith('blob:')) {
+          try {
+            const resolvedUrl = resolveUrl(url, pageUrl);
+            urls.add(resolvedUrl);
+          } catch (e) {
+            // Invalid URL, skip
+          }
+        }
+      }
+    });
+
+    // Extract webpack chunk manifest URLs
+    const webpackPatterns = [
+      /__webpack_require__\.p\s*\+\s*['"]([^'"]+)['"]/g,
+      /webpackChunkName:\s*['"]([^'"]+)['"]/g
+    ];
+
+    webpackPatterns.forEach(pattern => {
+      let match;
+      while ((match = pattern.exec(scriptContent)) !== null) {
+        const chunkPath = match[1];
+        if (chunkPath && chunkPath.endsWith('.js')) {
+          try {
+            const resolvedUrl = resolveUrl(chunkPath, pageUrl);
+            urls.add(resolvedUrl);
+          } catch (e) {
+            // Invalid URL, skip
+          }
+        }
+      }
+    });
+  });
+
   return Array.from(urls);
 }
 
-// Extract page links for crawling
+// Extract page links for crawling with enhanced detection
 function extractPageLinks($, pageUrl, baseUrl) {
   const links = new Set();
 
+  // Traditional anchor links
   $("a[href]").each((_, el) => {
     const href = $(el).attr("href");
     if (
@@ -252,6 +351,49 @@ function extractPageLinks($, pageUrl, baseUrl) {
       } catch (error) {
         // Invalid URL, skip
       }
+    }
+  });
+
+  // Extract routes from Next.js/React Router configurations
+  $("script:not([src])").each((_, el) => {
+    const scriptContent = $(el).html() || "";
+    
+    // Next.js route patterns
+    const routePatterns = [
+      /"\/[^"]*"/g,  // Routes in quotes
+      /'\/[^']*'/g,  // Routes in single quotes
+      /router\.push\(['"]([^'"]+)['"]\)/g,  // Router.push calls
+      /href:\s*['"]([^'"]+)['"]/g,  // href properties
+      /path:\s*['"]([^'"]+)['"]/g,  // path properties
+    ];
+
+    routePatterns.forEach(pattern => {
+      let match;
+      while ((match = pattern.exec(scriptContent)) !== null) {
+        const route = match[1] || match[0].replace(/['"]/g, '');
+        if (route && route.startsWith('/') && !route.includes('api') && !route.includes('_next')) {
+          try {
+            const absoluteUrl = resolveUrl(route, pageUrl);
+            const urlObj = new URL(absoluteUrl);
+            if (urlObj.origin === baseUrl.origin) {
+              links.add(absoluteUrl);
+            }
+          } catch (e) {
+            // Invalid URL, skip
+          }
+        }
+      }
+    });
+  });
+
+  // Common route patterns for popular frameworks
+  const commonRoutes = ['/about', '/contact', '/blog', '/services', '/portfolio', '/work'];
+  commonRoutes.forEach(route => {
+    try {
+      const absoluteUrl = resolveUrl(route, baseUrl.href);
+      links.add(absoluteUrl);
+    } catch (e) {
+      // Skip if invalid
     }
   });
 
@@ -419,8 +561,8 @@ function rewriteHtmlForOffline($, baseUrl, outputDir, currentPageUrl) {
   });
 }
 
-// Enhanced asset download with better fallback handling
-async function downloadAsset(url, outputDir, baseUrl) {
+// Enhanced asset download with better fallback handling and UI integration
+async function downloadAsset(url, outputDir, baseUrl, ui) {
   if (downloadedAssets.has(url)) {
     return downloadedAssets.get(url);
   }
@@ -430,7 +572,9 @@ async function downloadAsset(url, outputDir, baseUrl) {
     return null;
   }
 
-  console.log(`⬇️  Downloading: ${url}`);
+  if (ui && ui.logDownloading) {
+    ui.logDownloading(url);
+  }
 
   // Generate local filename
   const filename = generateAssetFilename(url);
@@ -455,10 +599,14 @@ async function downloadAsset(url, outputDir, baseUrl) {
     await pipeline(response.data, createWriteStream(outputPath));
     const normalizedPath = localPath.replace(/\\/g, "/");
     downloadedAssets.set(url, normalizedPath);
-    console.log(`✅ Downloaded: ${url} -> ${normalizedPath}`);
+    if (ui && ui.logSuccess) {
+      ui.logSuccess(url);
+    }
     return normalizedPath;
   } catch (axiosError) {
-    console.log(`⚠️  Axios failed for: ${url} - ${axiosError.message}`);
+    if (ui && ui.logWarning) {
+      ui.logWarning(`Axios failed: ${axiosError.message}`, url);
+    }
 
     // Method 2: Fallback to Puppeteer
     try {
@@ -486,16 +634,18 @@ async function downloadAsset(url, outputDir, baseUrl) {
         await fs.writeFile(outputPath, buffer);
         const normalizedPath = localPath.replace(/\\/g, "/");
         downloadedAssets.set(url, normalizedPath);
-        console.log(`✅ Downloaded via Puppeteer: ${url} -> ${normalizedPath}`);
+        if (ui && ui.logSuccess) {
+          ui.logSuccess(url);
+        }
         await browser.close();
         return normalizedPath;
       }
 
       await browser.close();
     } catch (puppeteerError) {
-      console.log(
-        `⚠️  Puppeteer failed for: ${url} - ${puppeteerError.message}`
-      );
+      if (ui && ui.logWarning) {
+        ui.logWarning(`Puppeteer failed: ${puppeteerError.message}`, url);
+      }
 
       // Method 3: Try native fetch
       try {
@@ -513,19 +663,23 @@ async function downloadAsset(url, outputDir, baseUrl) {
           await fs.writeFile(outputPath, new Uint8Array(buffer));
           const normalizedPath = localPath.replace(/\\/g, "/");
           downloadedAssets.set(url, normalizedPath);
-          console.log(`✅ Downloaded via fetch: ${url} -> ${normalizedPath}`);
+          if (ui && ui.logSuccess) {
+            ui.logSuccess(url);
+          }
           return normalizedPath;
         }
       } catch (fetchError) {
-        console.error(`❌ All download methods failed for: ${url}`);
-        console.error(`   Axios: ${axiosError.message}`);
-        console.error(`   Fetch: ${fetchError.message}`);
+        if (ui && ui.logError) {
+          ui.logError(`All download methods failed: ${fetchError.message}`, url);
+        }
       }
     }
   }
 
   // If all methods fail, we'll use the original URL as fallback in rewriteHtmlForOffline
-  console.log(`⚠️  Will use original URL as fallback: ${url}`);
+  if (ui && ui.logWarning) {
+    ui.logWarning("Will use original URL as fallback", url);
+  }
   return null;
 }
 
@@ -638,10 +792,10 @@ async function ensureDir(dirPath) {
 // Create routing fallback for SPA applications
 async function createRoutingFallback(outputDir) {
   const routingScript = `
-<!-- Routing fallback script -->
+<!-- Enhanced SPA routing fallback script -->
 <script>
 (function() {
-  // Handle SPA routing fallbacks
+  // Enhanced SPA routing handler
   function handleRouting() {
     const links = document.querySelectorAll('a[data-original-href]');
     links.forEach(link => {
@@ -649,21 +803,81 @@ async function createRoutingFallback(outputDir) {
         const originalHref = this.getAttribute('data-original-href');
         const href = this.getAttribute('href');
         
-        // Check if local file exists, otherwise try to handle client-side routing
-        fetch(href, { method: 'HEAD' })
-          .then(response => {
-            if (!response.ok) {
-              // File doesn't exist, try index.html for SPA routing
-              window.location.href = '/index.html' + (originalHref.includes('#') ? originalHref.split('#')[1] ? '#' + originalHref.split('#')[1] : '' : '');
-              e.preventDefault();
-            }
-          })
-          .catch(() => {
-            // Fetch failed, try index.html
-            window.location.href = '/index.html';
-            e.preventDefault();
-          });
+        // For SPA apps, prevent default and update URL without reload
+        if (originalHref && !originalHref.includes('#') && !originalHref.includes('mailto:') && !originalHref.includes('tel:')) {
+          e.preventDefault();
+          
+          // Try to fetch the content
+          fetch(href, { method: 'HEAD' })
+            .then(response => {
+              if (response.ok) {
+                // File exists, navigate normally
+                window.location.href = href;
+              } else {
+                // File doesn't exist, use client-side routing
+                handleClientSideRouting(originalHref);
+              }
+            })
+            .catch(() => {
+              // Fetch failed, use client-side routing
+              handleClientSideRouting(originalHref);
+            });
+        }
       });
+    });
+  }
+
+  // Handle client-side routing for SPA
+  function handleClientSideRouting(originalHref) {
+    try {
+      const url = new URL(originalHref, window.location.origin);
+      
+      // Update browser URL without reload
+      if (history.pushState) {
+        history.pushState({}, '', url.pathname + url.search + url.hash);
+        
+        // Trigger navigation event for SPA frameworks
+        window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+        
+        // Try to find and trigger router update
+        if (window.next && window.next.router) {
+          // Next.js router
+          window.next.router.push(url.pathname);
+        } else if (window.React && window.ReactRouterDOM) {
+          // React Router
+          const event = new CustomEvent('routechange', { detail: { path: url.pathname } });
+          window.dispatchEvent(event);
+        }
+      } else {
+        // Fallback for older browsers
+        window.location.href = '/index.html' + url.hash;
+      }
+    } catch (error) {
+      console.warn('Client-side routing failed:', error);
+      window.location.href = '/index.html';
+    }
+  }
+
+  // Handle dynamic import failures
+  function handleScriptErrors() {
+    const originalError = window.onerror;
+    window.onerror = function(message, source, lineno, colno, error) {
+      if (message && message.includes('Failed to load script')) {
+        console.warn('Script loading failed, continuing without:', source);
+        return true; // Prevent default error handling
+      }
+      if (originalError) {
+        return originalError.apply(this, arguments);
+      }
+      return false;
+    };
+
+    // Handle unhandled promise rejections (like failed dynamic imports)
+    window.addEventListener('unhandledrejection', function(event) {
+      if (event.reason && event.reason.message && event.reason.message.includes('Loading chunk')) {
+        console.warn('Chunk loading failed, continuing without:', event.reason);
+        event.preventDefault();
+      }
     });
   }
 
@@ -682,15 +896,25 @@ async function createRoutingFallback(outputDir) {
     });
   }
 
+  // Browser back/forward button handling
+  window.addEventListener('popstate', function(event) {
+    // Let the SPA framework handle the routing
+    if (window.next && window.next.router) {
+      window.next.router.push(window.location.pathname);
+    }
+  });
+
   // Run when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function() {
       handleRouting();
       handleImageErrors();
+      handleScriptErrors();
     });
   } else {
     handleRouting();
     handleImageErrors();
+    handleScriptErrors();
   }
 })();
 </script>`;
@@ -786,30 +1010,72 @@ self.addEventListener('fetch', event => {
               return response;
             }
             
-            // For HTML requests, try common SPA routing patterns
-            if (event.request.headers.get('accept')?.includes('text/html')) {
-              console.log('HTML request, trying routing fallbacks for:', url.pathname);
-              
-              // Try index.html in the same directory
-              const pathParts = url.pathname.split('/');
-              pathParts.pop(); // Remove filename
-              const dirPath = pathParts.join('/') || '';
-              const indexPath = dirPath + '/index.html';
-              
-              return caches.match(indexPath)
+            // Special handling for Next.js chunks and dynamic imports
+            if (url.pathname.includes('/_next/') || url.pathname.includes('/chunks/') || url.pathname.endsWith('.js')) {
+              console.log('Trying network for JS asset:', url.pathname);
+              return fetch(event.request)
                 .then(response => {
-                  if (response) {
-                    console.log('Found directory index:', indexPath);
+                  if (response.ok) {
+                    // Cache successful responses
+                    caches.open(CACHE_NAME).then(cache => {
+                      cache.put(event.request, response.clone());
+                    });
                     return response;
                   }
-                  
-                  // Fallback to root index.html for SPA routing
-                  console.log('Falling back to root index.html');
-                  return caches.match('/index.html');
+                  throw new Error('Network response not ok');
+                })
+                .catch(error => {
+                  console.log('JS asset failed to load from network:', url.pathname, error);
+                  return new Response('console.warn("Failed to load chunk: ' + url.pathname + '");', { 
+                    status: 200, 
+                    headers: { 'Content-Type': 'application/javascript' } 
+                  });
                 });
             }
             
-            // For non-HTML requests, try the network
+            // For HTML requests, try common SPA routing patterns
+            if (event.request.headers.get('accept')?.includes('text/html') || event.request.mode === 'navigate') {
+              console.log('HTML/Navigation request, trying routing fallbacks for:', url.pathname);
+              
+              // Try specific page HTML first
+              const pageHtml = url.pathname === '/' ? '/index.html' : url.pathname + '.html';
+              return caches.match(pageHtml)
+                .then(response => {
+                  if (response) {
+                    console.log('Found specific page:', pageHtml);
+                    return response;
+                  }
+                  
+                  // Try index.html in the same directory
+                  const pathParts = url.pathname.split('/');
+                  pathParts.pop(); // Remove filename
+                  const dirPath = pathParts.join('/') || '';
+                  const indexPath = dirPath + '/index.html';
+                  
+                  return caches.match(indexPath)
+                    .then(response => {
+                      if (response) {
+                        console.log('Found directory index:', indexPath);
+                        return response;
+                      }
+                      
+                      // Fallback to root index.html for SPA routing
+                      console.log('Falling back to root index.html');
+                      return caches.match('/index.html')
+                        .then(response => {
+                          if (response) {
+                            return response;
+                          }
+                          // Final fallback - try network
+                          return fetch(event.request).catch(() => {
+                            return new Response('Page not found', { status: 404 });
+                          });
+                        });
+                    });
+                });
+            }
+            
+            // For other requests, try the network
             console.log('Trying network for:', event.request.url);
             return fetch(event.request).catch(error => {
               console.log('Network failed for:', event.request.url, error);
@@ -870,8 +1136,11 @@ async function getAllFiles(dir) {
   return files;
 }
 
-// Local development server
+// Local development server with UI integration
 async function startServer(outputDir, port = 3000) {
+  // Start beautiful server UI
+  startServerUI(outputDir, port);
+
   const app = express();
 
   // Enable CORS for local development
@@ -904,8 +1173,8 @@ async function startServer(outputDir, port = 3000) {
     })
   );
 
-  // Handle SPA routing - serve index.html for non-file requests
-  app.get("*", (req, res) => {
+  // Handle SPA routing - catch-all for non-static files
+  app.use((req, res, next) => {
     // Check if it's a request for a file (has extension)
     const hasExtension = path.extname(req.path) !== "";
 
@@ -944,10 +1213,45 @@ async function startServer(outputDir, port = 3000) {
   const server = createServer(app);
 
   server.listen(port, () => {
-    console.log(`🚀 Server running at http://localhost:${port}`);
-    console.log(`📁 Serving files from: ${path.resolve(outputDir)}`);
-    console.log(`🌐 Open http://localhost:${port} in your browser`);
-    console.log(`⏹️  Press Ctrl+C to stop the server`);
+    // Server started successfully - UI will show the status
+  });
+
+  // Graceful shutdown
+  process.on("SIGINT", () => {
+    uiManager.cleanup();
+    server.close(() => {
+      process.exit(0);
+    });
+  });
+
+  return server;
+}
+
+async function serveFolder(folder, port = 3000) {
+  const app = express();
+
+  // Enable CORS for local development
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS"
+    );
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Origin, X-Requested-With, Content-Type, Accept"
+    );
+    next();
+  });
+
+  // serve static files
+  app.use(express.static(folder));
+
+  const server = createServer(app);
+
+  server.listen(port, () => {
+    console.log(`🚀 Serving "${folder}" at http://localhost:${port}`);
+    console.log("Press CTRL+C to stop the server");
   });
 
   // Graceful shutdown
@@ -962,20 +1266,8 @@ async function startServer(outputDir, port = 3000) {
   return server;
 }
 
-async function serveFolder(folder, port = 3000) {
-  const app = express();
-
-  // serve static files
-  app.use(express.static(folder));
-
-  app.listen(port, () => {
-    console.log(`🚀 Serving "${folder}" at http://localhost:${port}`);
-    console.log("Press CTRL+C to stop the server");
-  });
-}
-
-// CLI entry point
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Main CLI function
+async function main() {
   const args = process.argv.slice(2);
 
   // Check for serve command
@@ -984,8 +1276,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const port = parseInt(args[2]) || 3000;
 
     console.log(`🚀 Starting local server for: ${outputDir}`);
-    await serveFolder(outputDir, port);
-    process.exit(0);
+    try {
+      await startServer(outputDir, port);
+      // Server will run indefinitely until interrupted
+    } catch (error) {
+      console.error("❌ Failed to start server:", error.message);
+      process.exit(1);
+    }
+    return; // This prevents fall-through to the cloning logic
   }
 
   if (!args[0]) {
@@ -1055,31 +1353,23 @@ Workflow:
     }
   }
 
-  console.log(`⚙️  Configuration:
-  📁 Output Directory: ${options.outputDir}
-  📄 Max Pages: ${options.maxPages}
-  🚀 Concurrency: ${options.concurrency}
-  🤖 Use Puppeteer: ${options.usePuppeteer ? "Yes" : "No"}
-  `);
-
   try {
     await cloneWebsite(args[0], options);
-
-    console.log(`
-🎉 Cloning completed successfully!
-
-Next steps:
-1. Start the server: node cloner.js --serve ${options.outputDir}
-2. Open your browser: http://localhost:3000
-3. Your cloned site is ready to use!
-
-Note: Images and assets that failed to download will fallback to original URLs.
-      Make sure you have internet connection when viewing the site.
-`);
   } catch (error) {
+    uiManager.cleanup();
     console.error("❌ Cloning failed:", error.message);
     process.exit(1);
+  } finally {
+    uiManager.cleanup();
   }
+}
+
+// CLI entry point
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(error => {
+    console.error("❌ Unexpected error:", error.message);
+    process.exit(1);
+  });
 }
 
 export { cloneWebsite, downloadAsset, rewriteHtmlForOffline, startServer };

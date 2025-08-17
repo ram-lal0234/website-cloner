@@ -1,20 +1,68 @@
 {
   "name": "website-cloner",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "description": "Advanced CLI tool to clone websites locally with full functionality, SPA routing support, and local development server",
+  "main": "cloner.js",
   "type": "module",
-  "description": "",
+  "bin": {
+    "website-cloner": "./cloner.js",
+    "clone-site": "./cloner.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "clone:piyush": "babel-node cloner.js https://piyushgarg.dev piyush-site --max-pages=20",
+    "clone:google": "babel-node cloner.js https://google.com google-site --max-pages=5",
+    "clone:hitesh": "babel-node cloner.js https://hitesh.ai hitesh-site --max-pages=15",
+    "clone:vscode": "babel-node cloner.js https://code.visualstudio.com vscode-site --max-pages=10",
+    "serve:piyush": "babel-node cloner.js --serve piyush-site 3000",
+    "serve:google": "babel-node cloner.js --serve google-site 3001",
+    "serve:hitesh": "babel-node cloner.js --serve hitesh-site 3002",
+    "serve:vscode": "babel-node cloner.js --serve vscode-site 3003",
+    "clone-and-serve": "npm run clone:piyush && npm run serve:piyush",
+    "help": "babel-node cloner.js",
+    "start": "babel-node cloner.js"
+  },
+  "keywords": [
+    "website-cloner",
+    "web-scraper",
+    "static-site-generator",
+    "cli",
+    "offline-websites",
+    "web-crawler",
+    "spa-support",
+    "local-development"
+  ],
+  "author": "Website Cloner CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/website-cloner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/website-cloner/issues"
+  },
+  "homepage": "https://github.com/your-username/website-cloner#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "axios": "^1.11.0",
     "cheerio": "^1.1.0",
     "express": "^5.1.0",
+    "ink": "^6.2.0",
+    "ink-big-text": "^2.0.0",
+    "ink-gradient": "^3.0.0",
+    "ink-progress-bar": "^3.0.0",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
     "p-limit": "^7.0.0",
-    "puppeteer": "^24.16.2"
+    "puppeteer": "^24.16.2",
+    "react": "^19.1.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.3",
+    "@babel/node": "^7.28.0",
+    "@babel/preset-react": "^7.27.1"
   }
 }
